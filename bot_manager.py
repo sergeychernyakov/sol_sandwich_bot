@@ -8,7 +8,7 @@ class BotManager:
         self.account_address = config.ACCOUNT_ADDRESS
         self.rpc_url = config.SOLANA_RPC_URL
 
-    def get_confirmed_signatures_for_address(self, limit=10):
+    def get_confirmed_signatures_for_address(self, limit=1000):
         headers = {
             "Content-Type": "application/json",
         }
@@ -18,13 +18,17 @@ class BotManager:
             "method": "getSignaturesForAddress",
             "params": [
                 self.account_address,
-                {"limit": limit}
+                {
+                    "commitment": "confirmed", # "confirmed", # можно использовать также "finalized" или "processed"
+                    "limit": limit
+                }
             ]
         }
         response = requests.post(self.rpc_url, headers=headers, json=payload)
         return response.json()
 
     def get_transaction_details(self, signature):
+        # commitment "processed" is not supported.
         headers = {
             "Content-Type": "application/json",
         }
@@ -38,72 +42,75 @@ class BotManager:
             ]
         }
         response = requests.post(self.rpc_url, headers=headers, json=payload)
+        print(response.json())
+        if 'result' not in response.json() or response.json()['result'] is None:
+            return None
         return response.json()
 
     def parse_transaction(self, transaction):
-        # Extracting relevant information from the transaction
+        # Извлечение релевантной информации из транзакции
         transaction_info = {}
+        if transaction is None:
+            return transaction_info
         if 'transaction' in transaction:
-            transaction_info['signatures'] = transaction['transaction']['signatures']
-            message = transaction['transaction']['message']
-            transaction_info['instructions'] = message['instructions']
+            transaction_info['signatures'] = transaction['transaction'].get('signatures', [])
+            message = transaction['transaction'].get('message', {})
+            transaction_info['instructions'] = message.get('instructions', [])
             if 'meta' in transaction:
                 transaction_info['postBalances'] = transaction['meta'].get('postBalances', [])
                 transaction_info['preBalances'] = transaction['meta'].get('preBalances', [])
                 transaction_info['status'] = transaction['meta'].get('status', {})
         return transaction_info
 
-    def is_transaction_pending(self, transaction_response):
-        # Check if the transaction is pending
-        if 'result' not in transaction_response or transaction_response['result'] is None:
-            return True
-        return False
-
     def run(self):
         while True:
-            # Fetch confirmed signatures for the account
-            signatures_response = self.get_confirmed_signatures_for_address(limit=2)
+            # Получение подтвержденных подписей для аккаунта
+            signatures_response = self.get_confirmed_signatures_for_address(limit=10)
             if 'result' in signatures_response:
                 signatures = signatures_response['result']
-                print(f"Found {len(signatures)} transactions for account {self.account_address}")
+                print(f"Найдено {len(signatures)} транзакций для аккаунта {self.account_address}")
 
-                # Fetch transaction details for each signature
+                print('!!!!!!! Подписи:')
+                print(signatures)
+
+                # Фильтрация транзакций без ошибок и со статусом 'processed'
+                filtered_signatures = [sig['signature'] for sig in signatures if sig['err'] is None]
+
+                print('!!!!!!! Отфильтрованные подписи:')
+                print(filtered_signatures)
+
                 pending_transactions = []
-                for sig_info in signatures:
-                    signature = sig_info['signature']
+                for signature in filtered_signatures:
                     transaction_response = self.get_transaction_details(signature)
-                    if 'error' in transaction_response:
-                        if transaction_response['error']['code'] == 429:
-                            print(f"Rate limit error for transaction {signature}. Waiting before retrying.")
-                            time.sleep(1)  # Adjust this delay based on the API's rate limit policy
-                            break
-                        else:
-                            print(f"Failed to get details for transaction {signature}: {transaction_response['error']['message']}")
+                    if transaction_response is None:
+                        print(f"Детали транзакции для {signature} не доступны.")
                         continue
-
-                    if self.is_transaction_pending(transaction_response):
+                    if 'result' in transaction_response:
                         print(f"Transaction {signature} is pending.")
-                        pending_transactions.append((signature, self.parse_transaction(transaction_response.get('result', {}))))
-                    time.sleep(1)  # Add a delay to avoid rate limit errors
+                        parsed_transaction = self.parse_transaction(transaction_response['result'])
+                        pending_transactions.append((signature, parsed_transaction))
+                    time.sleep(1)  # Добавление задержки для избежания ошибок лимита скорости
 
-                # Print details of the pending transactions
+                # Печать деталей неподтвержденных транзакций
                 if pending_transactions:
-                    print(f"Found {len(pending_transactions)} pending transactions.")
+                    print(f"Найдено {len(pending_transactions)} неподтвержденных транзакций.")
                     for signature, details in pending_transactions:
-                        print(f"Transaction {signature} is pending.")
+                        print(f"Транзакция {signature} находится в ожидании.")
                         pre_balances = details.get('preBalances', [])
                         post_balances = details.get('postBalances', [])
-                        print(f"Transaction details: {details}")
-                        print(f"Pre-balances: {pre_balances}")
-                        print(f"Post-balances: {post_balances}")
-                        print(f"Instructions: {details['instructions']}")
-                        print(f"Status: {details['status']}")
+                        instructions = details.get('instructions', [])
+                        status = details.get('status', {})
+                        print(f"Детали транзакции: {details}")
+                        print(f"Балансы до: {pre_balances}")
+                        print(f"Балансы после: {post_balances}")
+                        print(f"Инструкции: {instructions}")
+                        print(f"Статус: {status}")
                 else:
-                    print("No pending transactions found.")
+                    print("Не найдено неподтвержденных транзакций.")
             else:
-                print("Failed to fetch signatures for address")
+                print("Не удалось получить подписи для адреса")
 
-            # Wait a bit before checking for new transactions
+            # Ожидание перед проверкой новых транзакций
             time.sleep(20)
 
 if __name__ == "__main__":
